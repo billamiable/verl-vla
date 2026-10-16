@@ -9,4 +9,7 @@ MuJoCo LIBERO harness used by the PI0.5 recipes.
 :maxdepth: 1
 
 arena-libero-spatial
+cross-node
+performance-benchmark
+gpu-benchmark-guide
 ```

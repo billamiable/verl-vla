@@ -137,6 +137,11 @@ The reference setup is one 8-GPU node: 4 simulation GPUs and 4 model GPUs. The
 two Ray pools are **disjoint**, so this needs 8 GPUs, not 4. `NUM_ENV` is per
 env worker, so the default gives 4 x 64 = 256 parallel auto-reset environments.
 
+The two pools can also run on two nodes, for example the model pool on an H20
+node and the simulation pool on an L20 node: start a Ray node on each with
+`start_ray_node.sh`, then launch `run_train_cross_node.sh` on the model node.
+See [the cross-node guide](../../../../../docs/reinforcement-learning/dsrl/gr00t/cross-node.md).
+
 Checkpoints are FSDP shards saved at `world_size=4` and the checkpoint manager
 does not reshard, so any later resume or evaluation must use the same
 `NUM_MODEL_GPUS`.
