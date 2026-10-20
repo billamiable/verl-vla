@@ -91,3 +91,15 @@ python scripts/summarize_sac_timing.py train.log --export-csv out_dir --label <�
 - **逐张探测 GPU**：在已测的 H20 节点上，0 号卡会让 Isaac 启动崩溃，其余卡正常。启动前逐张探测，用 `CUDA_VISIBLE_DEVICES` 把有问题的卡放到模型侧。探测脚本见 [性能基准](performance-benchmark.md) 的排错一节。Isaac Sim 的启动时间因节点而异（H20 70～90 s，L20 约 200 s），探测的 timeout 要留够，否则健康的卡也会因超时没有输出。
 - 不要并发启动多个 Isaac 进程，框架已有启动锁，不要绕过。
 - 挂载自定义缓存目录时不能是空目录，否则 Isaac 会一直卡在初始化，见同一节。
+
+## 7. 复现时的注意事项：更新耗时偏大怎么查
+
+已有参考值（`update_s`，纯更新步）：RTX PRO 5000 1.98 s，L20 3.19 s，H20 2.29 s，L20 环境加 H20 模型 2.50 s。如果复现出来明显偏大（例如整体慢约 2 倍，PRO 5000 和 L20 同时偏大），先按下面的顺序排查：
+
+1. **模型池的卡数和位置**：recipe 默认模型池 4 张卡（日志里 `gpus_per_node: 4`）。只有 2 张时，每张卡的 batch 翻倍，更新耗时约 2 倍。环境池和模型池也不能落在同一批卡上，否则更新会和 Isaac 抢显存带宽。用 `CUDA_VISIBLE_DEVICES` 固定顺序，并在更新阶段用 `nvidia-smi` 确认只有模型池的 4 张卡有负载。
+2. **统计口径**：`update_s` 只取纯更新步，不含每个 window 的第 1 次更新（含约 100 GB 写盘）和 rollout 步。直接用 `scripts/summarize_sac_timing.py` 的 `Plain update-only steps`，不要对所有步取平均。第 3 节里的 `warm_rollout_steps=1` 和 `critic.warmup_steps=2` 也必须加，否则前面会混入别的阶段。
+3. **replay pool 和输出目录放本地盘**：每次更新都要从 pool 采样，放在网络盘或慢盘上两种 GPU 都会变慢。
+4. **CPU 和节点负载**：容器不要用 `--cpus` 之类的限制；节点上不能有其他任务占用模型卡或大量 CPU；用 `nvidia-smi -q -d CLOCK,PERFORMANCE` 看 GPU 有没有被降频或限功耗。
+5. **镜像和代码版本**：记录镜像 ID（我们用的是 `6d285b1e4edd`，三个单节点配置完全一致）和仓库 commit，版本不同会带来 PyTorch、CUDA 的差异。
+
+以上都是排查方向，没有逐条验证过。如果以上都符合而仍然偏大，请带上完整训练日志一起对照，四种配置的完整训练日志（已脱敏）在 `docs/_static/results/dsrl_gr00t_pipeline_benchmark/train_logs/`，说明见 [性能基准](performance-benchmark.md) 的“原始数据”一节；跨节点配置的运行方法见 [跨节点运行](cross-node.md)。

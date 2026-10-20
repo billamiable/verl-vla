@@ -74,21 +74,21 @@ docker run -d --name "$NAME" --gpus all --network=host --ipc=host --privileged -
 先在模型节点上启动 head，`NODE_IP` 是模型节点在节点间网络上的地址：
 
 ```bash
-docker exec -e ROLE=head -e NODE_IP=192.168.253.45 dsrl_model \
+docker exec -e ROLE=head -e NODE_IP=<MODEL_NODE_IP> dsrl_model \
   bash examples/rl/dsrl/gr00t/arena_libero_spatial_online_from_sft_10000/start_ray_node.sh
 ```
 
 再在环境节点上加入，`NODE_IP` 是环境节点自己的地址，`HEAD_IP` 是模型节点的地址：
 
 ```bash
-docker exec -e ROLE=worker -e NODE_IP=192.168.253.31 -e HEAD_IP=192.168.253.45 dsrl_env \
+docker exec -e ROLE=worker -e NODE_IP=<ENV_NODE_IP> -e HEAD_IP=<MODEL_NODE_IP> dsrl_env \
   bash examples/rl/dsrl/gr00t/arena_libero_spatial_online_from_sft_10000/start_ray_node.sh
 ```
 
 确认集群里有两个节点、8 张 GPU 和两个标签：
 
 ```bash
-docker exec dsrl_model /isaac-sim/python.sh -m ray.scripts.scripts status --address=192.168.253.45:26379
+docker exec dsrl_model /isaac-sim/python.sh -m ray.scripts.scripts status --address=<MODEL_NODE_IP>:26379
 ```
 
 输出里应该有 `2` 个 active 节点、`0.0/8.0 GPU`、`0.0/1.0 sim` 和 `0.0/1.0 train_rollout`。
@@ -98,7 +98,7 @@ docker exec dsrl_model /isaac-sim/python.sh -m ray.scripts.scripts status --addr
 在模型节点的容器里运行。`run_train.sh` 的环境变量和 Hydra 覆盖项都可以照常使用：
 
 ```bash
-docker exec -d -e HEAD_IP=192.168.253.45 -e TASK_ID=7 -e OUTPUT_DIR=/local/$USER/dsrl_cross_node/run dsrl_model \
+docker exec -d -e HEAD_IP=<MODEL_NODE_IP> -e TASK_ID=7 -e OUTPUT_DIR=/local/$USER/dsrl_cross_node/run dsrl_model \
   bash -c "bash examples/rl/dsrl/gr00t/arena_libero_spatial_online_from_sft_10000/run_train_cross_node.sh \
     > /local/$USER/dsrl_cross_node/run/train.log 2>&1"
 ```
@@ -114,7 +114,7 @@ grep -aoE "\((EnvWorker|VLAActorRolloutRefWorker|_run_sac_remote)[^)]*\)" train.
 ```
 
 ```text
-    101 (EnvWorker pid=516, ip=192.168.253.31)
+    101 (EnvWorker pid=516, ip=<ENV_NODE_IP>)
    1022 (VLAActorRolloutRefWorker pid=8991)
     637 (_run_sac_remote pid=8320)
 ```
@@ -142,8 +142,8 @@ docker exec dsrl_model rm -rf /local/$USER/dsrl_cross_node/run/replay_pools
 
 | 网络 | 地址 | 标称速度 | 实测 TCP 带宽（L20 → H20，4 条流） |
 | --- | --- | --- | --- |
-| 前端/管理网（`enp3s0f0`） | `10.185.189.x` | L20 侧 1 Gb/s | 0.9 Gb/s |
-| `bond0`（2 × 100 Gb/s 聚合） | `192.168.253.x` | 200 Gb/s | 97 Gb/s |
+| 前端/管理网（`enp3s0f0`） | `<前端网地址>` | L20 侧 1 Gb/s | 0.9 Gb/s |
+| `bond0`（2 × 100 Gb/s 聚合） | `<节点间网络地址>` | 200 Gb/s | 97 Gb/s |
 
 SSH 和 `hostname -I` 给出的通常是前端网的地址，但它可能很慢。用 `ip -br addr` 和 `/sys/class/net/<网卡>/speed` 查看每块网卡的速度，再在两个节点之间实测带宽，然后把较快网络上的地址作为 `NODE_IP` 和 `HEAD_IP`。
 

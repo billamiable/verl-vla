@@ -147,6 +147,8 @@ window 1 和 window 2 相差在 3% 以内，所以流水线从 window 1 起进�
 | `<run>_rollouts.csv` | 一个 rollout 步 | 该步的计时，以及成功、失败和总 episode 的确切数量 |
 | `<run>_interactions.csv` | rollout 的一次交互 | 每次交互的秒数，以及其中结束或成功的 episode（来自进度条，它只跟踪 stage 0） |
 
+四种 GPU 配置的完整训练日志放在 `train_logs/` 下，已去掉 IP、用户名和本机路径：`pro5000.train.log.gz`、`l20.train.log.gz`、`h20.train.log.gz`（运行 A，465 步）和 `l20env_h20model.train.log.gz`。用 `zcat` 解压后可直接交给下面的脚本。
+
 它们由控制台日志生成：
 
 ```bash
