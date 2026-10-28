@@ -4,6 +4,8 @@
 
 测试方法和待测配置见 [GPU 配置对比测试指南](gpu-benchmark-guide.md)，跨节点的启动方法见 [跨节点运行](cross-node.md)。
 
+> **注意：** 本文所有仿真 step 数字都是在 recipe 默认开着调试用视频 recorder 的情况下测的。后来发现 recorder 本身占了绝大部分仿真 step 耗时（同一台 L20 上关掉后一次调用约 2.5 s，而不是约 38 s），见「视频 recorder 对仿真 step 耗时的影响」一节。所以仿真 step、reset 额外耗时和 window 合计的倍数反映的主要是 recorder 的 CPU 开销，不是纯仿真速度；推理等待和只更新步骤不受影响。
+
 ## 结论：推荐 RTX PRO 5000 节点
 
 **RTX PRO 5000 节点跑完一个稳态 window 只要 13.2 分钟，比 L20 节点（23.1 分钟）快 1.75 倍，比 H20 节点（27.8 分钟）快 2.1 倍，比取 L20 环境和 H20 模型之长的跨节点组合（21.3 分钟）也快 1.6 倍。** 同样一小时，它能跑 4.6 个 window，其他配置只有 2.2～2.8 个。
@@ -75,11 +77,44 @@ window 是流水线反复执行的单位：**一次 rollout，然后 160 次 SAC
 
 - **推荐的是整个节点配置，不只是 GPU。** RTX PRO 5000 节点的 CPU 也快得多（最高 5.0 GHz 对 2.8 GHz），仿真器主循环在单个 CPU 线程上占满 100%，所以环境上的优势有一部分可能来自 CPU。采购或选型时应同时选高主频 CPU，否则未必能复现这里的倍数。要把 GPU 和 CPU 的贡献分开，需要对单个仿真 step（渲染、物理、reset、主机侧）做 profile。
 - **GPU 本身对仿真速度也有影响。** L20 与 H20 的 CPU 型号相同，L20 上的环境仍快 1.3～1.6 倍。L20 和 RTX PRO 5000 有光追核心，H20 没有，而仿真器要渲染相机，这可能是原因之一，但没有 profile。
-- **H20 上 reset 特别贵。** reset 带来的额外耗时在 H20 上是 14～16 s，在有光追核心的 GPU 上只有 2～5 s。无 reset 的基准只依据每次运行的 2～3 次调用，这些数要按 ±几秒看待，原因没有调查。
+- **H20 上 reset 特别贵。** reset 带来的额外耗时在 H20 上是 14～16 s，在有光追核心的 GPU 上只有 2～5 s。无 reset 的基准只依据每次运行的 2～3 次调用，这些数要按 ±几秒看待。这个额外耗时主要是 recorder 保存 mp4（见「视频 recorder 对仿真 step 耗时的影响」），不是 simulator 的 reset，H20 上为什么更大没有调查。
 - **跨节点的通信开销很小，但不为零。** 仿真 step 和 L20 单节点相同，推理等待只比 H20 单节点多 0.1 s，说明观测和动作在节点间传输不是瓶颈。按单节点分项拼出的估算是 1240 s，实测 1276 s，多出约 3%。多出来的主要是 rollout 步其余（28 s 对 19～21 s）和只更新步骤（2.50 s 对 H20 单节点 2.28 s，慢 10%）。只更新步骤不涉及环境，为什么变慢没有调查。
 - **模型侧不受 GPU 间带宽限制**：没有 NVLink 的 RTX PRO 5000 比有 NVLink 的 H20 更新还快。L20 的 48 GB 显存也足够放下模型侧。
 - **启动更慢不影响结论。** RTX PRO 5000 上 Isaac Sim 启动比 H20 慢，但这是一次性开销，正式训练跑几十个 window，每个 window 节省 8～15 分钟。
 - **每种配置只跑了一次**，重复运行之间的波动未知。同一次运行里 window 1 和 window 2 相差 0.5%～3%，相对 1.6～2.1 倍的差距很小。
+
+## 视频 recorder 对仿真 step 耗时的影响
+
+recipe 的 `dsrl.yaml` 打开了调试用的视频 recorder（`recorder.enable: true`，`recorders: [video]`，后台线程异步写）。它只用来人工看视频，不是训练数据：训练数据由环境循环收集后直接写入 replay pool。它对每个仿真 step、64 个环境逐帧做两件事：
+
+- **每帧画文字面板**：用 PIL 画约 17 行文字（逐词 `getlength` 加 `draw.text`），L20 主机上每帧约 23 ms，RTX PRO 5000 主机上约 9 ms。仿真一个 step 只要约 0.125 s，而 recorder 要约 1.5 s；同步运行时 recorder 占 step 耗时的 92%。
+- **episode 结束时保存 mp4**：每个结束的 episode 起一个 ffmpeg 子进程写视频。大量 episode 同时结束时（window 0 的第 13、14 次交互）这会形成 reset 尖峰。simulator 自己的 reset 很便宜。
+
+在一台 L20 上用同一份代码（同一 commit）逐项对照，每次交互耗时：
+
+| 配置 | 每次交互 | 说明 |
+| --- | ---: | --- |
+| 默认（异步 recorder） | 39 s | 与本文 L20 的 38.3 s 一致 |
+| recorder 改为同步 | 52 s | |
+| 只给 `ImageFont.load_default` 加缓存 | 39 s | 无效，加载只要 0.02 ms |
+| 缓存文字宽度和行图（输出逐像素一致，300 帧 0 差异） | 16 s | 每帧约快 3 倍 |
+| 默认 recorder，但跳过 mp4 保存 | 14～15 s（原来 41～44 s） | 确认 reset 尖峰来自保存 mp4 |
+| 完全关闭 recorder | 4.5 s | env step 2.3～2.5 s |
+
+关闭 recorder 后，window 0、1、2 的对照：
+
+| | window 0 | window 1 | window 2 |
+| --- | ---: | ---: | ---: |
+| 仿真 step（s） | 2.5 | 2.4 | 2.3 |
+| 推理等待（s） | 2.27 | 2.21 | 2.21 |
+| 只更新步骤（s） | 3.231 | 3.245 | 3.227 |
+| 首次更新（s） | 60.8 | 251.8 | 243.9 |
+
+- 一次交互里 244 个 episode 同时结束时耗时 5～6 s，和无 reset 的 4～5 s 没有区别，reset 尖峰消失。
+- 仿真 step、推理和只更新三项在三个 window 间相差不到 8%，**关闭 recorder 后只测 window 0 就够**。首次更新（写 replay pool）和 window 合计在 window 0 里偏低，要看就跑到 window 1。这台 L20 的 replay pool 写盘慢（本地 SATA RAID，约 0.5 GB/s），所以首次更新约 250 s；本文 L20 的 NVMe 约 2.4 GB/s，约 40 s。
+- 关闭方式：加覆盖项 `cluster.env.env_worker.recorder.enable=false`。
+
+结论：本文的仿真 step、reset 额外耗时和 window 合计受 recorder 的 CPU 开销影响很大，对 RTX PRO 5000 比 L20 快的倍数，recorder 的 CPU 速度差（每帧 9 ms 对 23 ms）也占了一大部分。关闭 recorder 后环境耗时大幅缩小，window 里 160 次更新占主导，各配置的相对差距会和本文不同，需要重测。推理等待和只更新步骤不受 recorder 影响，本文这两项仍然可用。
 
 ## 流水线如何运行
 
@@ -127,7 +162,7 @@ H20 节点运行 A：
 | rollout 循环 | 1027 s | 1249 s | 1216 s |
 | 这次 rollout 里结束的 episode | 527 | 1023 | 839 |
 
-window 0 是唯一所有环境在同一时刻从 episode 开头出发的 rollout。前 7 次交互里没有 episode 结束；第一批成功出现在第 8～12 次交互，其余的 episode 在第 13 和 14 次交互里一起超时（13 个块 = 208 步，超过 200 步上限），几乎所有 reset 都集中在那里。所以每个环境大约完成一个 episode。从 window 1 起，环境从上次 rollout 继续，处于 episode 的不同位置，20 次交互里每个环境大约完成两个 episode，reset 翻倍，几乎每次调用都有 reset。策略的变化也可能有影响（成功率高则 episode 更短），但成功比例在运行 A 里上升（16%、39%、52%），在运行 B 里下降（85%、49%），所以不能解释这个差异。
+window 0 是唯一所有环境在同一时刻从 episode 开头出发的 rollout。前 6 次交互里没有 episode 结束（运行 A、L20 和 RTX PRO 5000 到第 7 次仍为 0，跨节点在第 7 次有 1 个）；第一批成功出现在第 8～12 次交互，其余的 episode 在第 13 和 14 次交互里一起超时（13 个块 = 208 步，超过 200 步上限），几乎所有 reset 都集中在那里。运行 B 的结束更分散，第 8～14 次逐步增加，没有第 13、14 次的集中。所以每个环境大约完成一个 episode。从 window 1 起，环境从上次 rollout 继续，处于 episode 的不同位置，20 次交互里每个环境大约完成两个 episode，reset 翻倍，几乎每次调用都有 reset。策略的变化也可能有影响（成功率高则 episode 更短），但成功比例在运行 A 里上升（16%、39%、52%），在运行 B 里下降（85%、49%），所以不能解释这个差异。
 
 window 1 和 window 2 相差在 3% 以内，所以流水线从 window 1 起进入稳态。比较时使用 window 1 及之后。
 
@@ -136,6 +171,32 @@ window 1 和 window 2 相差在 3% 以内，所以流水线从 window 1 起进�
 - **仿真池放在哪里没有影响。** 运行 B 把仿真池跨两个 NUMA 节点，window 1 里每次仿真 step 58.7 s，运行 A（仿真池在一个 NUMA 节点）是 59.8 s。差约 2%，低于 window 之间约 20% 的波动，所以只排除了很大的影响。
 - **window 的首个更新步耗时 38～51 s**，而不是 2.3 s。加入数据后，整个 replay pool 会立刻写盘（运行结束时每个 rank 约 26 GB），这很可能是主要部分。这一归因是推断，没有测量。
 - **绝对来说一次仿真 step 很慢**：在 H20 上 64 个环境 × 16 步用 59.8 s，整个节点每秒约 140 个环境 step；最快的 RTX PRO 5000 上也只有约 420 个。时间如何分配到渲染、物理、reset 和主机侧等待，没有测量。
+
+## GPU 互联拓扑与 NCCL P2P
+
+`update_actor` 里 4 张 model GPU 要通过 NCCL 同步梯度，所以更新耗时和 GPU 之间的互联路径、以及 NCCL 用 P2P 还是 SHM 有关。`nvidia-smi topo -m` 里的几种关系：
+
+| 标记 | 含义 |
+| --- | --- |
+| `PIX` | 同一个 PCIe switch 下，不经过 CPU |
+| `PXB` | 经过多个 PCIe switch，不经过 CPU |
+| `NODE` | 同一个 CPU 插槽下，但不在同一个 PCIe switch 下，经过 CPU 的 PCIe 根复合体 |
+| `SYS` | 跨 CPU 插槽 |
+
+NCCL 默认只对较近的路径启用 P2P（GPU 直接读写另一张 GPU 的显存），较远的路径退回 SHM（经过 CPU 共享内存拷贝）。环境变量 `NCCL_P2P_LEVEL` 可以改变这个阈值：`SYS` 表示任意距离都允许 P2P，`LOC` 表示不使用 P2P。
+
+| 节点 | GPU 0～3 的拓扑 | 默认传输 | 只更新一次 `update_actor` |
+| --- | --- | --- | --- |
+| L20（本文测的节点） | GPU0–1、GPU2–3 是 `PIX`，其余 `NODE` | 对 PIX 卡对默认应走 P2P（由拓扑推断，未抓 NCCL 日志） | 3.30 s（5 个样本） |
+| RTX PRO 5000 | GPU0–1、GPU2–3 是 `PXB`，其余 `NODE` | 默认应走 P2P；设 `NCCL_P2P_LEVEL=LOC` 后只走 SHM | 默认 1.96 s，LOC 2.30 s |
+| 另一台 L20（GPU 0～3 两两 `NODE`，没有 PIX 卡对） | 全部 `NODE` | 默认只走 SHM（实测带宽 4.6 GB/s） | 默认约 6.2 s；`NCCL_P2P_LEVEL=SYS` 后走 P2P（19.4 GB/s）约 3.2～3.35 s |
+
+要点：
+
+- 同一份代码和配置，更新耗时的差别来自 NCCL 的传输方式，不是 GPU 本身快慢。拓扑里没有近距离卡对的节点，需要设 `NCCL_P2P_LEVEL=SYS` 才能用上 P2P。
+- NCCL 版本（2.27.5 和 2.30.7）对结果没有影响。
+- 比较不同机器的 `update_actor` 前，要先记录并统一 `NCCL_P2P_LEVEL`，并用 `nvidia-smi topo -m` 确认拓扑。可以用 `NCCL_DEBUG=INFO` 在日志里确认 `via P2P/...` 还是 `via SHM/...`。
+- 上面 L20 和 RTX PRO 5000 两行的传输方式来自拓扑推断加对照实验，H20 的拓扑没有记录。
 
 ## 原始数据
 
@@ -194,6 +255,8 @@ docker run --rm --gpus all --network=host --ipc=host --privileged --shm-size=64g
 - 运行 A 在第 465 步停止，所以 window 2 只有 159 个只更新步中的 144 个，window 3 缺失。运行 B 只有 window 1 的 19 个只更新步。
 - 所有运行都从同一个 checkpoint 出发，但 window 0 的成功比例不同（H20 运行 A 16%、运行 B 85%，L20 28%，RTX PRO 5000 39%，跨节点 11%），原因没有调查。
 - replay pool 在 4 个 window 里会涨到磁盘上约 100 GB；请使用节点本地盘。
+- 本文所有运行都开着调试 recorder，仿真 step 的数字因此偏大，见「视频 recorder 对仿真 step 耗时的影响」。
+- 运行时没有设置 `NCCL_P2P_LEVEL`，也没有抓 NCCL 传输日志；`update_actor` 的传输方式见上面的“GPU 互联拓扑与 NCCL P2P”。
 
 ## 排错：Isaac Sim 在某张 GPU 上无法启动
 

@@ -51,6 +51,8 @@ docker run --rm --gpus all --network=host --ipc=host --privileged --shm-size=64g
 ```
 
 - 480 步是 3 个 window，各配置必须一致。其余保持 recipe 默认。
+- **关掉调试视频 recorder**：加覆盖项 `cluster.env.env_worker.recorder.enable=false`。recipe 默认开着它，逐帧画文字和保存 mp4 占了仿真 step 的绝大部分耗时（同一台 L20 上约 38 s 对 2.5 s），并带来 reset 尖峰，测出的是 CPU 的 PIL 速度而不是仿真速度。关掉后只测 window 0 就够测仿真 step、推理和只更新三项（`STEPS` 取 2～几十步即可）；要看首次更新和 window 合计，需要跑到 window 1（约 162 步）。详见 [性能基准](performance-benchmark.md) 的「视频 recorder 对仿真 step 耗时的影响」。
+- **统一 `NCCL_P2P_LEVEL`**：更新耗时和 NCCL 走 P2P 还是 SHM 有关。拓扑里没有近距离卡对（`nvidia-smi topo -m` 里 GPU 0～3 两两 `NODE`）的节点默认只走 SHM，更新慢约 2 倍，需要设 `NCCL_P2P_LEVEL=SYS`。所有配置要统一并记录这个变量。
 - 用 `-e CUDA_VISIBLE_DEVICES=4,5,6,7,0,1,2,3` 指定哪些卡跑环境（后 4 张）、哪些卡跑模型（前 4 张）。
 - 把日志放到本地盘；replay pool 会涨到约 100 GB。
 - 有条件每个配置跑 2 次，window 之间本身有约 20% 的波动。
@@ -63,7 +65,7 @@ docker run --rm --gpus all --network=host --ipc=host --privileged --shm-size=64g
 python scripts/summarize_sac_timing.py train.log --export-csv out_dir --label <配置名>
 ```
 
-脚本最后打印 **Key metrics**，请把这段输出连同日志和导出的三份 CSV 一起交回。比较时用 window 1 及之后（window 0 的 reset 少，偏快）。
+脚本最后打印 **Key metrics**，请把这段输出连同日志和导出的三份 CSV 一起交回。比较时，recorder 开着用 window 1 及之后（window 0 的 reset 少，偏快）；recorder 关掉后 window 0 和后面的 window 在仿真 step、推理、更新上没有区别，只有首次更新和 window 合计需要 window 1 及之后。
 
 | 指标 | 含义 | 可比性 |
 | --- | --- | --- |
@@ -82,6 +84,8 @@ python scripts/summarize_sac_timing.py train.log --export-csv out_dir --label <�
 - GPU 型号、显存、驱动版本。
 - **CPU 型号、核数、最高睿频**。Isaac 的主循环是单线程，CPU 对环境耗时影响很大。
 - 存储类型（本地 NVMe、RAID 还是网络盘）。
+- `nvidia-smi topo -m` 的输出，以及 `NCCL_P2P_LEVEL` 的取值（见第 3 节）。
+- recorder 是否开着。
 - 跨节点配置：网络类型和带宽。
 - 镜像 ID 和代码 commit。
 - 从容器启动到第一个训练步的时间。
@@ -100,6 +104,7 @@ python scripts/summarize_sac_timing.py train.log --export-csv out_dir --label <�
 2. **统计口径**：`update_s` 只取纯更新步，不含每个 window 的第 1 次更新（含约 100 GB 写盘）和 rollout 步。直接用 `scripts/summarize_sac_timing.py` 的 `Plain update-only steps`，不要对所有步取平均。第 3 节里的 `warm_rollout_steps=1` 和 `critic.warmup_steps=2` 也必须加，否则前面会混入别的阶段。
 3. **replay pool 和输出目录放本地盘**：每次更新都要从 pool 采样，放在网络盘或慢盘上两种 GPU 都会变慢。
 4. **CPU 和节点负载**：容器不要用 `--cpus` 之类的限制；节点上不能有其他任务占用模型卡或大量 CPU；用 `nvidia-smi -q -d CLOCK,PERFORMANCE` 看 GPU 有没有被降频或限功耗。
-5. **镜像和代码版本**：记录镜像 ID（我们用的是 `6d285b1e4edd`，三个单节点配置完全一致）和仓库 commit，版本不同会带来 PyTorch、CUDA 的差异。
+5. **NCCL 传输方式**：GPU 0～3 之间没有 `PIX`、`PXB` 卡对（两两 `NODE`）的节点，NCCL 默认只走 SHM，只更新一次约 6.2 s，设 `NCCL_P2P_LEVEL=SYS` 后约 3.2 s。用 `NCCL_DEBUG=INFO` 确认日志里是 `via P2P/...` 还是 `via SHM/...`，并和对照节点保持一致。见 [性能基准](performance-benchmark.md) 的「GPU 互联拓扑与 NCCL P2P」。
+6. **镜像和代码版本**：记录镜像 ID（我们用的是 `6d285b1e4edd`，三个单节点配置完全一致）和仓库 commit，版本不同会带来 PyTorch、CUDA 的差异。
 
 以上都是排查方向，没有逐条验证过。如果以上都符合而仍然偏大，请带上完整训练日志一起对照，四种配置的完整训练日志（已脱敏）在 `docs/_static/results/dsrl_gr00t_pipeline_benchmark/train_logs/`，说明见 [性能基准](performance-benchmark.md) 的“原始数据”一节；跨节点配置的运行方法见 [跨节点运行](cross-node.md)。
