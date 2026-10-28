@@ -114,7 +114,28 @@ recipe 的 `dsrl.yaml` 打开了调试用的视频 recorder（`recorder.enable: 
 - 仿真 step、推理和只更新三项在三个 window 间相差不到 8%，**关闭 recorder 后只测 window 0 就够**。首次更新（写 replay pool）和 window 合计在 window 0 里偏低，要看就跑到 window 1。这台 L20 的 replay pool 写盘慢（本地 SATA RAID，约 0.5 GB/s），所以首次更新约 250 s；本文 L20 的 NVMe 约 2.4 GB/s，约 40 s。
 - 关闭方式：加覆盖项 `cluster.env.env_worker.recorder.enable=false`。
 
-结论：本文的仿真 step、reset 额外耗时和 window 合计受 recorder 的 CPU 开销影响很大，对 RTX PRO 5000 比 L20 快的倍数，recorder 的 CPU 速度差（每帧 9 ms 对 23 ms）也占了一大部分。关闭 recorder 后环境耗时大幅缩小，window 里 160 次更新占主导，各配置的相对差距会和本文不同，需要重测。推理等待和只更新步骤不受 recorder 影响，本文这两项仍然可用。
+### 关闭 recorder 后，RTX PRO 5000 与另一台 L20 的 window 0 对比
+
+两边代码、镜像、模型和启动脚本一致，都关了 recorder、设了 `NCCL_P2P_LEVEL=SYS`，只跑 window 0（1 次 rollout 加 160 次更新）。这里的 L20 是另一台 L20 节点（不是上文的 L20 节点），上文的 L20 和 H20 没有重测。关闭 recorder 后不再有保存 mp4 的 reset 尖峰，所以对全部调用求平均，不再区分有无 reset：
+
+| 项目 | RTX PRO 5000 | L20 | RTX PRO 5000 快多少 |
+| --- | ---: | ---: | ---: |
+| 仿真等待（每次调用，64 个环境 × 16 步） | 2.1 s | 2.5 s | 1.2× |
+| 推理等待（每次调用） | 1.08 s | 2.27 s | 2.1× |
+| 一次交互（仿真 + 推理） | 3.18 s | 4.77 s | 1.5× |
+| 只更新步骤（每步） | 1.646 s | 3.231 s | 2.0× |
+| 一次 rollout（20 次交互） | 72.9 s | 124.9 s | 1.7× |
+| 首次更新（含写 replay pool） | 30.4 s | 60.8 s | 2.0× |
+| **window 合计** | **365 s** | **700 s** | **1.9×** |
+
+- **仿真的差距缩小了**：开着 recorder 时无 reset 的交互 RTX PRO 5000 对 L20 是 2.2 倍，关掉后仿真等待只差 1.2 倍。之前的差距大部分来自 recorder 的 CPU 开销。
+- **window 合计仍快约 1.9 倍**，来自推理和更新（都约 2 倍），不受 recorder 影响，和上文的数字一致（上文 1.75 倍）。
+- **更新占 window 的约 80%**：RTX PRO 5000 为 292 s（rollout 73 s，更新 292 s），L20 为 575 s（rollout 125 s）。这是 recipe 的配比造成的：每个 window 只有 20 次交互，却有 160 次更新（off-policy，每次采样后更新很多次）。换配比或换成 on-policy 算法，环境占比会不同。没有测过其他算法。
+- **首次更新的 2 倍夹杂盘速差异**：L20 一侧的 replay pool 在本地 SATA RAID（约 0.5 GB/s）上，RTX PRO 5000 一侧在软件 RAID 卷上，所以这一项只作参考。
+- **RTX PRO 5000 的更新变快了**：1.646 s，上文默认 NCCL 设置、recorder 开着时是 1.956 s。这次同时改了 recorder 和 `NCCL_P2P_LEVEL`，没有分开是哪个起作用。
+- 每项只跑了一次，没有测重复运行的波动。
+
+结论：本文上面所有仿真 step、reset 额外耗时和 window 合计受 recorder 的 CPU 开销影响很大。推理等待和只更新步骤不受影响，仍然可用；RTX PRO 5000 最快的方向在关掉 recorder 后依然成立，但环境不再是主要差距来源。其余配置关闭 recorder 后的完整对比没有做，需要重测。
 
 ## 流水线如何运行
 
